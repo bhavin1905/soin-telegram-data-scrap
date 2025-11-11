@@ -1,0 +1,170 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+.venv/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# PyCharm / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# IDEs
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Project Specific - Telegram Session Files
+*.session
+*.session-journal
+cloud_run_production.session
+*.session-*
+
+# Project Specific - Temporary Files
+tmp/
+temp/
+*.tmp
+*.log
+build-errors.log
+
+# Project Specific - Data Files (uncomment if you don't want to track CSV files)
+*.csv
+# XURL.csv  # Uncomment if you want to track this specific file
+# twitter_check_results.csv  # Uncomment if you want to track this specific file
+
+# Project Specific - Scripts (uncomment if these are temporary)
+# create_session.py
+# create_production_session.py
+# get_chat_id.py
+# checkTwitterLink.py
+# delete_Duplicate.py
+# adding_mongo.py
+# python_database_migration.py
+
+# Google Cloud
+.gcloud/
+*.json
+!package.json
+!package-lock.json
+
+# Docker
+.dockerignore
+
+# Build artifacts
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# PowerShell
+*.ps1.bak
+
+# Session and state files
+*.session
+*.state
+

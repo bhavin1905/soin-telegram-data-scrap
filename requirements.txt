@@ -1,0 +1,8 @@
+telethon
+requests
+dexscreener
+pymongo
+python-dotenv
+httpx
+motor
+aiohttp
