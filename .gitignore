@@ -105,10 +105,10 @@ Thumbs.db
 Desktop.ini
 
 # Project Specific - Telegram Session Files
-*.session
-*.session-journal
-cloud_run_production.session
-*.session-*
+# *.session
+# *.session-journal
+# cloud_run_production.session
+# *.session-*
 
 # Project Specific - Temporary Files
 tmp/
