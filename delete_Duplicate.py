@@ -2,10 +2,12 @@ from pymongo import MongoClient
 
 # 1. Connect to your MongoDB Atlas cluster
 # Replace <username>, <password>, <cluster-url>, and <database>
-client = MongoClient("mongodb+srv://bhavinparmar1953:123qwerty@cluster0.qndu4.mongodb.net/")
+client = MongoClient("mongodb+srv://globalsoin20:Uu5mmE9pqEtfBB1a@cluster0.6k3hcco.mongodb.net/")
 
-db = client["telegram_tokens"]  # Database name
-collection = db["group_user_counts_webhook_test"]  # Replace with your collection name
+db = client["soin-pump"]  # Database name
+collection = db["telegram_influencer_data"]  # Replace with your collection name
+
+print("Connected to MongoDB")
 
 # 2. Find duplicates
 pipeline = [
