@@ -39,6 +39,36 @@ telegram_client_status = {"connected": False, "last_heartbeat": None}
 app_status = {"healthy": True, "startup_time": datetime.utcnow()}
 
 
+def extract_dexscreener_fields(dexscreener_data):
+    """
+    Extract only specific fields from dexscreener data:
+    chainId, dexId, url, pairAddress, baseToken, priceNative, priceUsd, 
+    volume, liquidity, fdv, marketCap, info
+    """
+    if not isinstance(dexscreener_data, list):
+        return []
+    
+    extracted_pairs = []
+    for pair in dexscreener_data:
+        extracted_pair = {
+            "chainId": pair.get("chainId"),
+            "dexId": pair.get("dexId"),
+            "url": pair.get("url"),
+            "pairAddress": pair.get("pairAddress"),
+            "baseToken": pair.get("baseToken"),
+            "priceNative": pair.get("priceNative"),
+            "priceUsd": pair.get("priceUsd"),
+            "volume": pair.get("volume"),
+            "liquidity": pair.get("liquidity"),
+            "fdv": pair.get("fdv"),
+            "marketCap": pair.get("marketCap"),
+            "info": pair.get("info")
+        }
+        extracted_pairs.append(extracted_pair)
+    
+    return extracted_pairs
+
+
 # Health check web server for Cloud Run
 async def health_check(request):
     """Health check endpoint for Cloud Run"""
@@ -188,6 +218,7 @@ async def handler(event):
         user_count = None
         try:
             full_info = await client(GetFullChannelRequest(channel=group_entity))
+            logging.info(f"Full info: {full_info}")
             user_count = getattr(full_info.full_chat, 'participants_count', None)
         except Exception:
             pass
@@ -197,6 +228,39 @@ async def handler(event):
             else str(message.sender_id) if message.sender_id
             else "Unknown"
         )
+
+        # Get user profile image
+        profile_image_url = None
+        try:
+            if message.sender:
+                # Get profile photos
+                photos = await client.get_profile_photos(message.sender, limit=1)
+                if photos and len(photos) > 0:
+                    # Get the latest profile photo
+                    latest_photo = photos[0]
+                    # Download the photo to a temporary location or get the file reference
+                    # For now, we'll store the photo file ID and download path
+                    try:
+                        # Ensure tmp directory exists
+                        os.makedirs("tmp", exist_ok=True)
+                        # Download the photo file
+                        photo_path = await client.download_profile_photo(
+                            message.sender,
+                            file=f"tmp/profile_{message.sender_id}_{latest_photo.id}.jpg"
+                        )
+                        if photo_path:
+                            profile_image_url = photo_path
+                            logging.info(f"Profile photo downloaded for user {influencer}, path: {photo_path}")
+                        else:
+                            # Fallback: store photo ID if download fails
+                            profile_image_url = f"telegram_photo_id_{latest_photo.id}"
+                            logging.info(f"Profile photo found for user {influencer}, photo ID: {latest_photo.id} (stored as ID only)")
+                    except Exception as download_error:
+                        # Fallback: store photo ID if download fails
+                        profile_image_url = f"telegram_photo_id_{latest_photo.id}"
+                        logging.warning(f"Could not download profile photo for user {influencer}, storing ID only: {str(download_error)}")
+        except Exception as photo_error:
+            logging.warning(f"Could not get profile photo for user {influencer}: {str(photo_error)}")
 
         msg_time_dt = message.date if message.date else datetime.utcnow()
 
@@ -232,9 +296,14 @@ async def handler(event):
                 if not found_match:
                     # Fetch new Dexscreener data
                     dexscreener_data = fetch_dexscreener_data(addr)
-                    logging.info(f"Fetched Dexscreener data for {addr}: {dexscreener_data}")
 
-                    first_pair = dexscreener_data[0] if isinstance(dexscreener_data, list) and len(dexscreener_data) > 0 else {}
+                    logging.info(f"Dexscreener data: {dexscreener_data}")
+                    # Extract only the specified fields: chainId, dexId, url, pairAddress, 
+                    # baseToken, priceNative, priceUsd, volume, liquidity, fdv, marketCap, info
+                    extracted_dex_data = extract_dexscreener_fields(dexscreener_data)
+                    logging.info(f"Fetched and extracted Dexscreener data for {addr}: {len(extracted_dex_data)} pairs")
+
+                    first_pair = extracted_dex_data[0] if isinstance(extracted_dex_data, list) and len(extracted_dex_data) > 0 else {}
 
                     chain_id = first_pair.get("chainId") or first_pair.get("chain")
                     base_token_address = first_pair.get("baseToken", {}).get("address") if first_pair.get("baseToken") else None
@@ -245,20 +314,19 @@ async def handler(event):
                         "Contract Address": base_token_address,
                         "Group User Count": user_count,
                         "Username": influencer,
+                        "Profile Image URL": profile_image_url,
                         "Message DateTime": msg_time_dt,
                         "Full Message": msg_text,
-                        "Dexscreener Data": dexscreener_data,
+                        "Dexscreener Data": extracted_dex_data,
                         "Call Count": 1,
-                        # "Base Token Address": base_token_address,
                         "Message Link": message_link,
                     }
                     await test_collection.insert_one(doc)
                     logging.info(f"Inserted new document for {addr} user {influencer}")
-                    logging.info(f"Document: {doc}")
 
                     dex_data_for_webhook.append({
                         "contract_address": addr,
-                        "dexscreener": dexscreener_data
+                        "dexscreener": extracted_dex_data
                     })
 
                 contracts_for_payload.append({"address": addr})

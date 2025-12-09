@@ -36,6 +36,7 @@ def get_token_data(doc):
         if dexscreener_data and len(dexscreener_data) > 0:
             first_pair = dexscreener_data[0]
             base_token = first_pair.get("baseToken", {})
+            pair_address = first_pair.get("pairAddress", None)
             token_name = base_token.get("name")
             token_symbol = base_token.get("symbol")
             info = first_pair.get("info", {})
@@ -54,6 +55,7 @@ def get_token_data(doc):
             "full_message": full_message,
             "token_name": token_name,
             "token_symbol": token_symbol,
+            "pair_address": pair_address,
             "chain": chain,
             "dex_url": dex_url,
             "social_links": social_links,
@@ -106,6 +108,7 @@ def create_simplified_collection():
             "group_name": group_name,
             "token_name": token_data.get("token_name"),
             "token_symbol": token_data.get("token_symbol"),
+            "pair_address": token_data.get("pair_address"),
             "dex_url": token_data.get("dex_url"),
             "full_message": token_data.get("full_message"),
             "chain": token_data.get("chain"),
@@ -135,6 +138,7 @@ def create_simplified_collection():
                     "$set": {
                         "token_name": simplified_data.get("token_name"),
                         "token_symbol": simplified_data.get("token_symbol"),
+                        "pair_address": simplified_data.get("pair_address"),
                         "dex_url": simplified_data.get("dex_url"),
                         "token_image": simplified_data.get("token_image"),
                         "banner_image": simplified_data.get("banner_image"),
@@ -167,3 +171,5 @@ if __name__ == "__main__":
         client.close()
 
     logging.info("🎉 Simplified token summary collection creation complete!")
+
+

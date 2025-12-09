@@ -13,8 +13,35 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 ERROR_NOTIFICATION_CHAT_ID = os.getenv("ERROR_NOTIFICATION_CHAT_ID")  # Admin chat ID for error notifications
 ERROR_NOTIFICATION_BOT_TOKEN = os.getenv("ERROR_NOTIFICATION_BOT_TOKEN")  # Bot token for sending error notifications
 
-# Setup your MongoDB client here or elsewhere
+# PostgreSQL/Supabase settings
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:bh@vinJ1905@db.xlgjwdorrhptzrftvmns.supabase.co:5432/postgres")
 
+# Parse DATABASE_URL if provided, otherwise use individual components
+if DATABASE_URL:
+    # Parse the connection string
+    import re
+    match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', DATABASE_URL)
+    if match:
+        DB_USER = match.group(1)
+        DB_PASSWORD = match.group(2)
+        DB_HOST = match.group(3)
+        DB_PORT = match.group(4)
+        DB_NAME = match.group(5)
+    else:
+        # Fallback to individual environment variables
+        DB_USER = os.getenv("DB_USER", "postgres")
+        DB_PASSWORD = os.getenv("DB_PASSWORD", "bh@vinJ1905")
+        DB_HOST = os.getenv("DB_HOST", "db.xlgjwdorrhptzrftvmns.supabase.co")
+        DB_PORT = os.getenv("DB_PORT", "5432")
+        DB_NAME = os.getenv("DB_NAME", "postgres")
+else:
+    DB_USER = os.getenv("DB_USER", "postgres")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "bh@vinJ1905")
+    DB_HOST = os.getenv("DB_HOST", "db.xlgjwdorrhptzrftvmns.supabase.co")
+    DB_PORT = os.getenv("DB_PORT", "5432")
+    DB_NAME = os.getenv("DB_NAME", "postgres")
+
+# Setup your MongoDB client here or elsewhere
 MONGODB_URI = os.getenv("MONGODB_URI")
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 test_collection = mongo_client["soin-pump"]["telegram_influencer_data"]
