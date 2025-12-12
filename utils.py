@@ -20,3 +20,32 @@ def fetch_dexscreener_data(contract_address: str):
         pass
     return []
 
+
+def extract_dexscreener_fields(dexscreener_data):
+    """
+    Extract only specific fields from dexscreener data:
+    chainId, dexId, url, pairAddress, baseToken, priceNative, priceUsd, 
+    volume, liquidity, fdv, marketCap, info
+    """
+    if not isinstance(dexscreener_data, list):
+        return []
+    
+    extracted_pairs = []
+    for pair in dexscreener_data:
+        extracted_pair = {
+            "chainId": pair.get("chainId"),
+            "dexId": pair.get("dexId"),
+            "url": pair.get("url"),
+            "pairAddress": pair.get("pairAddress"),
+            "baseToken": pair.get("baseToken"),
+            "priceNative": pair.get("priceNative"),
+            "priceUsd": pair.get("priceUsd"),
+            "volume": pair.get("volume"),
+            "liquidity": pair.get("liquidity"),
+            "fdv": pair.get("fdv"),
+            "marketCap": pair.get("marketCap"),
+            "info": pair.get("info")
+        }
+        extracted_pairs.append(extracted_pair)
+    
+    return extracted_pairs
