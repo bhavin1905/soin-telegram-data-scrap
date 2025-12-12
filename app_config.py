@@ -43,5 +43,13 @@ else:
 
 # Setup your MongoDB client here or elsewhere
 MONGODB_URI = os.getenv("MONGODB_URI")
+
+# Validate MONGODB_URI before creating client
+if not MONGODB_URI or MONGODB_URI.strip() == "":
+    raise ValueError(
+        "MONGODB_URI environment variable is not set or is empty. "
+        "Please set it in your environment variables or .env file."
+    )
+
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 test_collection = mongo_client["soin-pump"]["telegram_influencer_data"]

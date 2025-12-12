@@ -3,9 +3,12 @@ import logging
 import os
 import traceback
 import datetime
+import asyncio
 import httpx
 import asyncpg
 import uuid
+from datetime import datetime as dt, timezone
+from aiohttp import web
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import GetFullChannelRequest, GetParticipantsRequest
 from supabase import create_client
@@ -18,6 +21,12 @@ from app_config import (
 )
 from utils import fetch_dexscreener_data, extract_dexscreener_fields
 
+# Debug print environment variables (same as telegram_listener.py)
+print("DEBUG ENV VARIABLES:")
+print("TELEGRAM_API_ID:", os.getenv("TELEGRAM_API_ID"))
+print("TELEGRAM_API_HASH:", os.getenv("TELEGRAM_API_HASH"))
+print("TELEGRAM_SESSION:", os.getenv("TELEGRAM_SESSION"))
+
 logging.basicConfig(level=logging.INFO)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -26,17 +35,48 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def check_image_exists(dest_path):
+    """Check if image already exists in Supabase storage"""
+    try:
+        # Try to get the file - if it exists, this won't raise an error
+        folder = '/'.join(dest_path.split('/')[:-1])  # Get folder path
+        file_name = dest_path.split('/')[-1]  # Get file name
+        
+        # List files in the folder
+        files = supabase.storage.from_("images").list(folder if folder else "")
+        
+        # Check if our file exists
+        for file in files:
+            if file.get('name') == file_name:
+                return True
+        return False
+    except Exception as e:
+        # If there's an error (folder doesn't exist, etc.), assume file doesn't exist
+        logging.debug(f"Error checking if image exists (assuming it doesn't): {e}")
+        return False
+
+
+def get_image_url(dest_path):
+    """Get public URL for an image in Supabase storage"""
+    try:
+        return supabase.storage.from_("images").get_public_url(dest_path)
+    except Exception as e:
+        logging.error(f"Error getting image URL: {e}")
+        return None
+
+
 def upload_image(local_file_path, dest_path):
-    with open(local_file_path, "rb") as f:
-        supabase.storage.from_("images").upload(dest_path, f)
-    return supabase.storage.from_("images").get_public_url(dest_path)
+    """Upload image to Supabase storage"""
+    try:
+        with open(local_file_path, "rb") as f:
+            supabase.storage.from_("images").upload(dest_path, f, file_options={"upsert": "true"})
+        return supabase.storage.from_("images").get_public_url(dest_path)
+    except Exception as e:
+        logging.error(f"Error uploading image: {e}")
+        return None
 
-# Use environment variables if available, otherwise fallback to hardcoded values
-api_id = int(TELEGRAM_API_ID) if TELEGRAM_API_ID else 28700349
-api_hash = TELEGRAM_API_HASH if TELEGRAM_API_HASH else "ef8fb06cffda02c80d4fda3b782e6fd6"
-session_name = TELEGRAM_SESSION if TELEGRAM_SESSION else 'session'
-
-client = TelegramClient(session_name, api_id, api_hash)
+# Use same client initialization as telegram_listener.py
+client = TelegramClient(TELEGRAM_SESSION, int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
 
 # Address extraction patterns
 patterns = {
@@ -48,9 +88,88 @@ patterns = {
 }
 compiled_patterns = {k: re.compile(v) for k, v in patterns.items()}
 
-# PostgreSQL connection pool (will be initialized on first use)
+# Global variables for health monitoring (same as telegram_listener.py)
+telegram_client_status = {"connected": False, "last_heartbeat": None}
+app_status = {"healthy": True, "startup_time": dt.now(timezone.utc)}
 
 
+
+
+# Health check web server for Cloud Run
+async def health_check(request):
+    """Health check endpoint for Cloud Run"""
+    status = {
+        "status": "healthy" if app_status["healthy"] else "unhealthy",
+        "telegram_connected": telegram_client_status["connected"],
+        "uptime_seconds": (dt.now(timezone.utc) - app_status["startup_time"]).total_seconds(),
+        "last_heartbeat": telegram_client_status["last_heartbeat"].isoformat() if telegram_client_status["last_heartbeat"] else None,
+        "timestamp": dt.now(timezone.utc).isoformat()
+    }
+    
+    if app_status["healthy"] and telegram_client_status["connected"]:
+        return web.json_response(status, status=200)
+    else:
+        return web.json_response(status, status=503)
+
+
+async def root_handler(request):
+    """Root endpoint"""
+    return web.json_response({
+        "service": "telegram-userbot",
+        "status": "running",
+        "version": "1.0.0",
+        "timestamp": dt.now(timezone.utc).isoformat()
+    })
+
+
+async def create_web_app():
+    """Create aiohttp web application for health checks"""
+    app = web.Application()
+    app.router.add_get('/', root_handler)
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/ready', health_check)
+    return app
+
+
+async def start_health_server():
+    """Start the health check web server"""
+    try:
+        app = await create_web_app()
+        port = int(os.getenv('PORT', 8080))
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        
+        logging.info(f"🏥 Health check server started on port {port}")
+        return runner
+    except Exception as e:
+        logging.error(f"Failed to start health server: {e}")
+        await send_error_notification(
+            "Health Server Startup Error",
+            f"Failed to start health check server: {str(e)}"
+        )
+        raise
+
+
+async def heartbeat_monitor():
+    """Monitor Telegram client connection and update status"""
+    while True:
+        try:
+            if client.is_connected():
+                telegram_client_status["connected"] = True
+                telegram_client_status["last_heartbeat"] = dt.now(timezone.utc)
+            else:
+                telegram_client_status["connected"] = False
+                logging.warning("Telegram client disconnected")
+            
+            await asyncio.sleep(30)  # Check every 30 seconds
+        except Exception as e:
+            logging.error(f"Heartbeat monitor error: {e}")
+            telegram_client_status["connected"] = False
+            await asyncio.sleep(30)
 
 
 async def send_error_notification(error_message: str, error_details: str = None):
@@ -60,7 +179,7 @@ async def send_error_notification(error_message: str, error_details: str = None)
         return
     
     try:
-        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        timestamp = dt.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         notification_text = "🚨 **USERBOT ERROR ALERT** 🚨\n\n"
         notification_text += f"**Time:** {timestamp}\n"
         notification_text += f"**Error:** {error_message}\n"
@@ -72,9 +191,16 @@ async def send_error_notification(error_message: str, error_details: str = None)
         
         notification_text += "\n⚠️ Please check the server logs for more information."
         
-        bot_url = f"https://api.telegram.org/bot{ERROR_NOTIFICATION_BOT_TOKEN}/sendMessage"
+        # Clean URL to remove any line endings or whitespace
+        bot_token = ERROR_NOTIFICATION_BOT_TOKEN.strip() if ERROR_NOTIFICATION_BOT_TOKEN else None
+        chat_id = ERROR_NOTIFICATION_CHAT_ID.strip() if ERROR_NOTIFICATION_CHAT_ID else None
+        
+        if not bot_token or not chat_id:
+            return
+            
+        bot_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
-            "chat_id": ERROR_NOTIFICATION_CHAT_ID,
+            "chat_id": chat_id,
             "text": notification_text,
             "parse_mode": "Markdown"
         }
@@ -105,9 +231,30 @@ async def reader(event):
         message = message_obj.message
         msg_text = message_obj.message
 
-        # Group full info
-        full = await client(GetFullChannelRequest(chat))
-        user_count = getattr(full.full_chat, 'participants_count', None)
+        # Group full info (same as telegram_listener.py)
+        user_count = None
+        full_info = None
+        try:
+            # Try to get full channel info - this may fail for private groups or if bot lacks permissions
+            full_info = await client(GetFullChannelRequest(channel=chat))
+            logging.info(f"Full info: {full_info}")
+            user_count = getattr(full_info.full_chat, 'participants_count', None)
+        except (ValueError, TypeError) as ve:
+            # This usually means the entity couldn't be resolved (private group, no access, etc.)
+            # This is normal and expected for many groups, so we don't log it as an error
+            pass
+        except Exception as full_info_error:
+            # Log other errors but don't fail the entire message processing
+            error_str = str(full_info_error)
+            error_type = type(full_info_error).__name__
+            # Suppress common resolution errors that are expected
+            if "get_input_entity" in error_str or "resolve" in error_str or "get_peer" in error_str:
+                # These are common and expected for private groups
+                pass
+            else:
+                # Log unexpected errors
+                logging.warning(f"Could not get full channel info ({error_type}): {error_str[:200]}")
+            pass
 
         # Print group details (existing functionality)
         print("\n--- Group Details ---")
@@ -115,7 +262,10 @@ async def reader(event):
         print("Name:", chat.title)
         print("Username:", chat.username)
         print("Members:", user_count)
-        print("About:", full.full_chat.about)
+        if full_info:
+            print("About:", getattr(full_info.full_chat, 'about', 'N/A'))
+        else:
+            print("About: N/A")
         print("ID:", chat.id)
         print("Message Datetime: ", datetime.datetime.now())
 
@@ -152,42 +302,116 @@ async def reader(event):
             else "Unknown"
         )
 
-        # Get user profile image and store in PostgreSQL
+        # Get user profile image - always store URL
+        # First, check if we already have a profile_image URL for this user from previous messages
         profile_image_url = None
         try:
-            if message_obj.sender:
-                photos = await client.get_profile_photos(message_obj.sender, limit=1)
-                if photos and len(photos) > 0:
-                    latest_photo = photos[0]
-                    try:
-                        # Download photo to temporary location
-                        os.makedirs("tmp", exist_ok=True)
-                        temp_photo_path = f"tmp/profile_{message_obj.sender_id}_{latest_photo.id}.jpg"
-                        photo_path = await client.download_profile_photo(
-                            message_obj.sender,
-                            file=temp_photo_path
-                        )
+            # Check existing documents for this user to find existing profile_image URL
+            existing_user_docs = await test_collection.find({"Username": influencer}).to_list(length=1)
+            if existing_user_docs and len(existing_user_docs) > 0:
+                existing_profile_image = existing_user_docs[0].get("profile_image")
+                # Check if it's a valid URL (not None, not empty, and not just a photo ID)
+                if existing_profile_image and existing_profile_image.strip() and not existing_profile_image.startswith("telegram_photo_id_"):
+                    profile_image_url = existing_profile_image
+                    logging.info(f"Reusing existing profile image URL for user {influencer} from previous message")
+        except Exception as check_error:
+            logging.debug(f"Could not check existing profile image: {str(check_error)}")
+        
+        # If we don't have an existing URL, try to get/download the profile image
+        if not profile_image_url:
+            try:
+                if message_obj.sender:
+                    photos = await client.get_profile_photos(message_obj.sender, limit=1)
+                    if photos and len(photos) > 0:
+                        latest_photo = photos[0]
+                        file_name = f"profile/{message_obj.sender_id}_{latest_photo.id}.jpg"
                         
-                        if photo_path:
-                            file_name = f"profile/{message_obj.sender_id}_{latest_photo.id}.jpg"
-                            profile_image_url = upload_image(photo_path, file_name)
-                            
-                            # Clean up temporary file
+                        # Check if image already exists in storage
+                        if check_image_exists(file_name):
+                            # Image exists, get the URL
+                            profile_image_url = get_image_url(file_name)
+                            if profile_image_url:
+                                logging.info(f"Profile image already exists in storage for user {influencer}, using existing URL")
+                            else:
+                                # If we can't get URL, try to re-upload
+                                logging.warning(f"Could not get URL for existing image, will re-upload")
+                                profile_image_url = None  # Will trigger re-upload below
+                    
+                    # If image doesn't exist or URL retrieval failed, download and upload
+                    if not profile_image_url:
+                        max_retries = 2
+                        for attempt in range(max_retries):
                             try:
-                                if os.path.exists(photo_path):
-                                    os.remove(photo_path)
-                            except Exception as cleanup_error:
-                                logging.warning(f"Could not clean up temporary file {photo_path}: {str(cleanup_error)}")
-                        else:
-                            profile_image_url = f"telegram_photo_id_{latest_photo.id}"
-                            logging.info(f"Profile photo found for user {influencer}, photo ID: {latest_photo.id} (not downloaded)")
-                    except Exception as download_error:
-                        profile_image_url = f"telegram_photo_id_{latest_photo.id}"
-                        logging.warning(f"Could not download profile photo for user {influencer}: {str(download_error)}")
-        except Exception as photo_error:
-            logging.warning(f"Could not get profile photo for user {influencer}: {str(photo_error)}")
+                                # Download photo to temporary location
+                                os.makedirs("tmp", exist_ok=True)
+                                temp_photo_path = f"tmp/profile_{message_obj.sender_id}_{latest_photo.id}.jpg"
+                                photo_path = await client.download_profile_photo(
+                                    message_obj.sender,
+                                    file=temp_photo_path
+                                )
+                                
+                                if photo_path and os.path.exists(photo_path):
+                                    # Upload to storage with retry
+                                    profile_image_url = upload_image(photo_path, file_name)
+                                    if profile_image_url:
+                                        logging.info(f"Profile image uploaded to storage for user {influencer} (attempt {attempt + 1})")
+                                        # Clean up temporary file
+                                        try:
+                                            os.remove(photo_path)
+                                        except Exception as cleanup_error:
+                                            logging.warning(f"Could not clean up temporary file {photo_path}: {str(cleanup_error)}")
+                                        break  # Success, exit retry loop
+                                    else:
+                                        logging.warning(f"Upload failed for user {influencer}, attempt {attempt + 1}/{max_retries}")
+                                        if attempt < max_retries - 1:
+                                            await asyncio.sleep(1)  # Wait before retry
+                                else:
+                                    logging.warning(f"Download failed for user {influencer}, attempt {attempt + 1}/{max_retries}")
+                                    if attempt < max_retries - 1:
+                                        await asyncio.sleep(1)  # Wait before retry
+                            except Exception as download_error:
+                                logging.warning(f"Error processing profile photo for user {influencer}, attempt {attempt + 1}/{max_retries}: {str(download_error)}")
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(1)  # Wait before retry
+                        
+                        # If all attempts failed, construct a Supabase URL anyway (even if file doesn't exist)
+                        # This ensures we always have a URL format, not just a photo ID
+                        if not profile_image_url:
+                            try:
+                                # Try to get URL using Supabase client (even if file doesn't exist, it returns the URL structure)
+                                profile_image_url = get_image_url(file_name)
+                                if not profile_image_url:
+                                    # Construct the expected Supabase public URL
+                                    # Format: https://{project_ref}.supabase.co/storage/v1/object/public/{bucket}/{path}
+                                    if SUPABASE_URL:
+                                        # Extract project ref from SUPABASE_URL
+                                        # SUPABASE_URL format: https://{project_ref}.supabase.co
+                                        base_url = SUPABASE_URL.rstrip('/')
+                                        # Remove /rest/v1 if present
+                                        base_url = base_url.replace('/rest/v1', '')
+                                        profile_image_url = f"{base_url}/storage/v1/object/public/images/{file_name}"
+                                        logging.warning(f"Using constructed Supabase URL for user {influencer} (file may not exist yet): {profile_image_url}")
+                                    else:
+                                        # Last resort: use a placeholder URL structure
+                                        profile_image_url = f"https://storage.supabase.co/images/{file_name}"
+                                        logging.warning(f"Using placeholder URL for user {influencer}: {profile_image_url}")
+                            except Exception as url_error:
+                                # If URL construction fails, still create a proper URL format
+                                if SUPABASE_URL:
+                                    base_url = SUPABASE_URL.rstrip('/').replace('/rest/v1', '')
+                                    profile_image_url = f"{base_url}/storage/v1/object/public/images/{file_name}"
+                                else:
+                                    profile_image_url = f"https://storage.supabase.co/images/{file_name}"
+                                logging.error(f"Error constructing URL, using fallback: {str(url_error)}")
+                    else:
+                        # No profile photo found
+                        logging.debug(f"No profile photo found for user {influencer}")
+            except Exception as photo_error:
+                logging.warning(f"Could not get profile photo for user {influencer}: {str(photo_error)}")
+        
+        # Always store profile_image_url (even if None) - this ensures we always have the field
 
-        msg_time_dt = message_obj.date if message_obj.date else datetime.datetime.utcnow()
+        msg_time_dt = message_obj.date if message_obj.date else dt.now(timezone.utc)
 
         dex_data_for_webhook = []
         contracts_for_payload = []
@@ -210,13 +434,22 @@ async def reader(event):
                         chain_id = pair.get("chainId") or pair.get("chain")
                         base_token_address = pair.get("baseToken", {}).get("address")
                         if chain_id and base_token_address:
-                            # If match found, increment Call Count and skip fetching new data
+                            # If match found, increment Call Count and update profile_image if needed
+                            update_data = {"$inc": {"Call Count": 1}}
+                            
+                            # Always update profile_image if we have one (even if it's the same)
+                            # This ensures profile_image is always stored/updated
+                            if profile_image_url:
+                                update_data["$set"] = {"profile_image": profile_image_url}
+                            
                             await test_collection.update_one(
                                 {"_id": doc["_id"]},
-                                {"$inc": {"Call Count": 1}}
+                                update_data
                             )
                             found_match = True
                             logging.info(f"Incremented Call Count for {addr} for user {influencer}")
+                            if profile_image_url:
+                                logging.info(f"Updated profile_image for user {influencer}")
                             print(f"✓ Incremented Call Count for existing document")
                             break
                     if found_match:
@@ -313,30 +546,100 @@ async def reader(event):
         )
 
 
+async def main():
+    global app_status
+    
+    try:
+        # Start health check server first
+        logging.info("🚀 Starting Telegram Userbot service...")
+        health_runner = await start_health_server()
+        
+        # Start Telegram client
+        # Don't pass phone parameter - let Telethon use the session file
+        # If session file exists and is valid, it will connect automatically
+        try:
+            # Check if session file exists
+            session_file = f"{TELEGRAM_SESSION}.session"
+            if os.path.exists(session_file):
+                logging.info(f"📁 Found session file: {session_file}")
+                file_size = os.path.getsize(session_file)
+                logging.info(f"📁 Session file size: {file_size} bytes")
+            else:
+                logging.error(f"❌ Session file not found: {session_file}")
+                logging.error("💡 Solution: Create a session file using create_production_session.py")
+                raise FileNotFoundError(f"Session file not found: {session_file}")
+            
+            # Start client - don't pass phone=None, let it use session file
+            # This will work if session file is valid
+            await client.start()
+            
+            if client.is_connected():
+                telegram_client_status["connected"] = True
+                telegram_client_status["last_heartbeat"] = dt.now(timezone.utc)
+                logging.info("🚀 Telegram client connected successfully")
+            else:
+                raise Exception("Client started but not connected")
+                
+        except Exception as client_error:
+            error_msg = f"Failed to start Telegram client: {str(client_error)}"
+            logging.error(f"❌ {error_msg}")
+            logging.error(f"Error type: {type(client_error).__name__}")
+            
+            # Check if it's an authentication error
+            if "EOF" in str(client_error) or "reading a line" in str(client_error):
+                logging.error("❌ Authentication error: Session file may be invalid or expired")
+                logging.error("💡 Solution: Create a new session file using create_production_session.py")
+            elif "No phone number" in str(client_error):
+                logging.error("❌ Session file is invalid or expired")
+                logging.error("💡 Solution: Create a new session file using create_production_session.py")
+            
+            raise
+        
+        # Start heartbeat monitor
+        heartbeat_task = asyncio.create_task(heartbeat_monitor())
+        
+        # Mark app as healthy
+        app_status["healthy"] = True
+        logging.info("🚀 Telegram userbot started and healthy...")
+        
+        # Run until disconnected
+        try:
+            await client.run_until_disconnected()
+        finally:
+            # Cleanup
+            heartbeat_task.cancel()
+            if health_runner:
+                await health_runner.cleanup()
+                
+    except Exception as e:
+        error_msg = f"Critical error in main function: {str(e)}"
+        error_details = traceback.format_exc()
+        logging.error(f"❌ {error_msg}")
+        logging.error(f"Error details: {error_details}")
+        
+        # Mark app as unhealthy
+        app_status["healthy"] = False
+        telegram_client_status["connected"] = False
+        
+        # Send error notification
+        await send_error_notification(
+            "Critical Application Error",
+            f"Telegram Userbot application crashed: {str(e)}\n\nFull traceback:\n{error_details}"
+        )
+        
+        # Re-raise the exception to ensure proper exit codes
+        raise
+
+
 if __name__ == "__main__":
     try:
-        client.start()
-        print("Userbot started...")
-        client.run_until_disconnected()
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("🛑 Userbot stopped by user")
+        logging.info("🛑 Application stopped by user")
+        app_status["healthy"] = False
+        telegram_client_status["connected"] = False
     except Exception as e:
         logging.error(f"❌ Fatal error: {str(e)}")
+        app_status["healthy"] = False
+        telegram_client_status["connected"] = False
         exit(1)
-    finally:
-        # Cleanup database connection pool
-        if _db_pool:
-
-
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If loop is running, schedule the close
-                    asyncio.create_task(_db_pool.close())
-                else:
-                    # If loop is not running, run the close
-                    loop.run_until_complete(_db_pool.close())
-                logging.info("Database connection pool closed")
-            except Exception as cleanup_error:
-                logging.warning(f"Error closing database pool: {str(cleanup_error)}")
