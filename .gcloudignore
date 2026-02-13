@@ -1,0 +1,55 @@
+# Same as .gitignore so Cloud Build gets a clean context.
+# We explicitly include the production session file so it is in the image.
+# See https://cloud.google.com/build/docs/configuring-builds/submit-build-config#specifying_source_files
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+.venv/
+
+# Environment variables (do not bundle in image)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDEs / OS / temp / logs (same as .gitignore)
+.idea/
+.vscode/
+*.log
+logs/
+tmp/
+temp/
+*.session-journal
+*.state
+
+# Do NOT ignore *.session - cloud_run_production.session must be in the image

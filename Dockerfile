@@ -15,4 +15,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["python", "telegram_bot_test_one.py"]
+CMD ["python", "telegram_listener.py"]

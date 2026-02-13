@@ -13,7 +13,8 @@ from telethon import TelegramClient, events
 from telethon.tl.functions.channels import GetFullChannelRequest, GetParticipantsRequest
 from supabase import create_client
 from telethon.tl.types import ChannelParticipantsSearch
-
+from dotenv import load_dotenv
+load_dotenv()
 from app_config import (
     WEBHOOK_URL, TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION,
     ERROR_NOTIFICATION_CHAT_ID, ERROR_NOTIFICATION_BOT_TOKEN, test_collection,

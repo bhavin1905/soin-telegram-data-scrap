@@ -63,7 +63,7 @@ if (-not (Test-Path ".env")) {
 
 # Load environment variables from .env file
 Get-Content ".env" | ForEach-Object {
-    if ($_ -match "^([^#][^=]+)=(.*)$") {
+    if ($_ -match '^([^#][^=]+)=(.*)$') {
         [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
     }
 }
@@ -82,6 +82,8 @@ $envVars = @(
     "MONGODB_URI=$env:MONGODB_URI",
     "ERROR_NOTIFICATION_BOT_TOKEN=$env:ERROR_NOTIFICATION_BOT_TOKEN",
     "ERROR_NOTIFICATION_CHAT_ID=$env:ERROR_NOTIFICATION_CHAT_ID",
+    "SUPABASE_URL=$env:SUPABASE_URL",
+    "SUPABASE_KEY=$env:SUPABASE_KEY",
     "PYTHONUNBUFFERED=1"
 ) -join ","
 
@@ -111,6 +113,6 @@ Write-Host "📋 To view logs, run:" -ForegroundColor Blue
 Write-Host "gcloud logs tail --follow --format=json --service=$ServiceName --project=$ProjectId"
 
 Write-Host "📋 To update the service, run:" -ForegroundColor Blue
-Write-Host ".\deploy.ps1"
+Write-Host '.\deploy.ps1'
 
-Write-Host "🎉 Telegram Listener is now running on Google Cloud Run!" -ForegroundColor Green
+Write-Host '🎉 Telegram Listener is now running on Google Cloud Run!' -ForegroundColor Green
