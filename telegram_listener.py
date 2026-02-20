@@ -522,6 +522,7 @@ import httpx
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import GetFullChannelRequest
 from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import create_client
 
 from utils import fetch_dexscreener_data, extract_dexscreener_fields
 
@@ -537,11 +538,16 @@ PORT = int(os.getenv("PORT", 8080))
 ERROR_CHAT = os.getenv("ERROR_NOTIFICATION_CHAT_ID")
 ERROR_BOT = os.getenv("ERROR_NOTIFICATION_BOT_TOKEN")
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 logging.basicConfig(level=logging.INFO)
 
 
 # ================= CLIENTS =================
 tg = TelegramClient(SESSION, API_ID, API_HASH)
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 mongo = AsyncIOMotorClient(MONGO_URI)
 db = mongo["telegram_alpha"]
@@ -627,6 +633,85 @@ def now():
     return datetime.now(UTC)
 
 
+# ================= SUPABASE IMAGE OPS =================
+def check_image_exists(dest_path):
+    """Check if image already exists in Supabase storage"""
+    if not supabase:
+        return False
+    try:
+        folder = '/'.join(dest_path.split('/')[:-1])
+        file_name = dest_path.split('/')[-1]
+        files = supabase.storage.from_("images").list(folder if folder else "")
+        return any(f.get('name') == file_name for f in files)
+    except Exception:
+        return False
+
+
+def get_image_url(dest_path):
+    """Get public URL for an image in Supabase storage"""
+    if not supabase:
+        return None
+    try:
+        return supabase.storage.from_("images").get_public_url(dest_path)
+    except Exception:
+        return None
+
+
+def upload_image(local_file_path, dest_path):
+    """Upload image to Supabase storage and return public URL"""
+    if not supabase:
+        return None
+    try:
+        with open(local_file_path, "rb") as f:
+            supabase.storage.from_("images").upload(dest_path, f, file_options={"upsert": "true"})
+        return supabase.storage.from_("images").get_public_url(dest_path)
+    except Exception as e:
+        logging.error(f"Error uploading image: {e}")
+        return None
+
+
+async def get_profile_image_url(sender, sender_id, username):
+    """Download sender's profile photo, upload to Supabase, return URL."""
+    if not supabase or not sender:
+        return None
+
+    try:
+        photos = await tg.get_profile_photos(sender, limit=1)
+        if not photos:
+            return None
+
+        latest = photos[0]
+        dest = f"profile/{sender_id}_{latest.id}.jpg"
+
+        if check_image_exists(dest):
+            url = get_image_url(dest)
+            if url:
+                return url
+
+        os.makedirs("tmp", exist_ok=True)
+        tmp_path = f"tmp/profile_{sender_id}_{latest.id}.jpg"
+
+        for attempt in range(2):
+            try:
+                path = await tg.download_profile_photo(sender, file=tmp_path)
+                if path and os.path.exists(path):
+                    url = upload_image(path, dest)
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    if url:
+                        return url
+            except Exception:
+                if attempt == 0:
+                    await asyncio.sleep(1)
+
+        return get_image_url(dest)
+    except Exception as e:
+        logging.warning(f"Could not get profile photo for {username}: {e}")
+        return None
+
+
 # ================= DB OPS =================
 async def upsert_group(chat, member_count):
     username = safe_username(getattr(chat, "username", None), chat.id)
@@ -698,24 +783,26 @@ async def upsert_token(chain, contract, pair):
     )
 
 
-async def insert_call(group_doc, token_doc, msg, link):
+async def insert_call(group_doc, token_doc, msg, link, caller_username=None, profile_image_url=None):
     try:
-        await calls.insert_one(
-            {
-                "group_id": group_doc["_id"],
-                "token_id": token_doc["_id"],
-                "message_text": msg,
-                "message_link": link,
-                "created_at": now(),
-            }
-        )
+        call_doc = {
+            "group_id": group_doc["_id"],
+            "token_id": token_doc["_id"],
+            "message_text": msg,
+            "message_link": link,
+            "created_at": now(),
+        }
+        if caller_username:
+            call_doc["caller_username"] = caller_username
+        if profile_image_url:
+            call_doc["profile_image"] = profile_image_url
+
+        await calls.insert_one(call_doc)
     except Exception:
         return  # duplicate safely ignored
 
-    await groups.update_one(
-        {"_id": group_doc["_id"]},
-        {"$inc": {"total_calls": 1}, "$addToSet": {"unique_tokens": token_doc["_id"]}},
-    )
+    group_update = {"$inc": {"total_calls": 1}, "$addToSet": {"unique_tokens": token_doc["_id"]}}
+    await groups.update_one({"_id": group_doc["_id"]}, group_update)
 
     await tokens.update_one(
         {"_id": token_doc["_id"]},
@@ -769,6 +856,17 @@ async def handler(event):
             else None
         )
 
+        # Get caller info and profile image
+        sender = event.message.sender
+        sender_id = event.message.sender_id
+        caller_username = (
+            sender.username if sender and hasattr(sender, 'username') and sender.username
+            else str(sender_id) if sender_id
+            else "Unknown"
+        )
+
+        profile_image_url = await get_profile_image_url(sender, sender_id, caller_username)
+
         for addr in addresses:
             dex_raw = fetch_dexscreener_data(addr)
             pairs = extract_dexscreener_fields(dex_raw)
@@ -784,9 +882,9 @@ async def handler(event):
                 continue
 
             token_doc = await upsert_token(chain, contract, pair)
-            await insert_call(group_doc, token_doc, text, link)
+            await insert_call(group_doc, token_doc, text, link, caller_username, profile_image_url)
 
-            logging.info(f"Stored call {contract} from {group_doc['name']}")
+            logging.info(f"Stored call {contract} from {group_doc['name']} by {caller_username}")
 
     except Exception:
         await notify_error("Handler Crash", traceback.format_exc())
