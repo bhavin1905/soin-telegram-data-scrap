@@ -4,7 +4,12 @@
 
 - Docker Desktop running
 - Google Cloud SDK (`gcloud`) installed and authenticated
-- `cloud_run_production.session` in project root
+- Auth: either `cloud_run_production.session` in project root **or** env `TELEGRAM_STRING_SESSION` (see below)
+
+### String session (Railway / no session file in image)
+
+1. Locally, with a working file session: `python export_string_session.py`
+2. Set **`TELEGRAM_STRING_SESSION`** to the printed line (secret). Omit or ignore file session in prod.
 
 ## Deploy
 

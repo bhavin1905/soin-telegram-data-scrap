@@ -520,6 +520,7 @@ from aiohttp import web
 
 import httpx
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetFullChannelRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from supabase import create_client
@@ -531,6 +532,8 @@ from utils import fetch_dexscreener_data, extract_dexscreener_fields
 API_ID = int(os.getenv("TELEGRAM_API_ID"))
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION = os.getenv("TELEGRAM_SESSION")
+# Optional: long session string (Railway / serverless — no .session file in image)
+TELEGRAM_STRING_SESSION = (os.getenv("TELEGRAM_STRING_SESSION") or "").strip()
 
 MONGO_URI = os.getenv("MONGODB_URI")
 PORT = int(os.getenv("PORT", 8080))
@@ -547,11 +550,21 @@ APP_START_TIME = datetime.now(UTC)
 
 
 # ================= CLIENTS =================
-tg = TelegramClient(SESSION, API_ID, API_HASH)
+# Prefer TELEGRAM_STRING_SESSION when set (env-only auth); else file {TELEGRAM_SESSION}.session
+if TELEGRAM_STRING_SESSION:
+    tg = TelegramClient(StringSession(TELEGRAM_STRING_SESSION), API_ID, API_HASH)
+else:
+    if not SESSION:
+        raise ValueError("Set TELEGRAM_STRING_SESSION or TELEGRAM_SESSION (session file name)")
+    tg = TelegramClient(SESSION, API_ID, API_HASH)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-mongo = AsyncIOMotorClient(MONGO_URI)
+mongo = AsyncIOMotorClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=10000,
+)
 db = mongo["telegram_alpha"]
 
 groups = db["groups"]
@@ -655,6 +668,23 @@ def now():
     return datetime.now(UTC)
 
 
+async def resolve_chat_from_event(event):
+    """
+    Prefer event.chat or get_entity(chat_id).
+    Avoid await event.get_chat() — it can trigger iter_dialogs() and fail under load (e.g. Railway).
+    """
+    chat = event.chat
+    if chat is not None:
+        return chat
+    cid = getattr(event, "chat_id", None)
+    if cid is not None:
+        return await tg.get_entity(cid)
+    peer = getattr(event.message, "peer_id", None)
+    if peer is not None:
+        return await tg.get_entity(peer)
+    raise ValueError("Cannot resolve chat from event")
+
+
 # ================= SUPABASE IMAGE OPS =================
 def check_image_exists(dest_path):
     """Check if image already exists in Supabase storage"""
@@ -697,8 +727,13 @@ async def get_profile_image_url(sender, sender_id, username):
     if not supabase or not sender:
         return None
 
+    _PHOTO_TIMEOUT = 12.0
+
     try:
-        photos = await tg.get_profile_photos(sender, limit=1)
+        photos = await asyncio.wait_for(
+            tg.get_profile_photos(sender, limit=1),
+            timeout=_PHOTO_TIMEOUT,
+        )
         if not photos:
             return None
 
@@ -715,7 +750,10 @@ async def get_profile_image_url(sender, sender_id, username):
 
         for attempt in range(2):
             try:
-                path = await tg.download_profile_photo(sender, file=tmp_path)
+                path = await asyncio.wait_for(
+                    tg.download_profile_photo(sender, file=tmp_path),
+                    timeout=_PHOTO_TIMEOUT,
+                )
                 if path and os.path.exists(path):
                     url = upload_image(path, dest)
                     try:
@@ -729,6 +767,9 @@ async def get_profile_image_url(sender, sender_id, username):
                     await asyncio.sleep(1)
 
         return get_image_url(dest)
+    except asyncio.TimeoutError:
+        logging.warning(f"Profile photo timed out for {username}")
+        return None
     except Exception as e:
         logging.warning(f"Could not get profile photo for {username}: {e}")
         return None
@@ -845,65 +886,80 @@ ADDRESS_REGEX = {
 
 compiled_patterns = {k: re.compile(v) for k, v in ADDRESS_REGEX.items()}
 
+# Max time for one message (addresses + dex + DB + optional photo)
+HANDLER_TIMEOUT_SEC = 120.0
+GET_FULL_CHANNEL_TIMEOUT_SEC = 10.0
+
+
+async def _process_new_message(event):
+    text = event.message.message
+    if not text:
+        return
+
+    addresses = {
+        addr
+        for regex in compiled_patterns.values()
+        for addr in regex.findall(text)
+    }
+
+    if not addresses:
+        return
+
+    chat = await resolve_chat_from_event(event)
+
+    member_count = None
+    try:
+        full = await asyncio.wait_for(
+            tg(GetFullChannelRequest(channel=chat)),
+            timeout=GET_FULL_CHANNEL_TIMEOUT_SEC,
+        )
+        member_count = getattr(full.full_chat, "participants_count", None)
+    except Exception:
+        pass
+
+    profile_image_url = await get_profile_image_url(
+        chat, chat.id, getattr(chat, "username", None) or str(chat.id)
+    )
+
+    group_doc = await upsert_group(chat, member_count, profile_image_url)
+
+    link = (
+        f"https://t.me/{group_doc['username']}/{event.message.id}"
+        if not group_doc["username"].startswith("tg_")
+        else None
+    )
+
+    for addr in addresses:
+        dex_raw = await asyncio.to_thread(fetch_dexscreener_data, addr)
+        pairs = extract_dexscreener_fields(dex_raw)
+
+        if not pairs:
+            continue
+
+        pair = pairs[0]
+        chain = pair.get("chainId")
+        contract = pair.get("baseToken", {}).get("address")
+
+        if not chain or not contract:
+            continue
+
+        token_doc = await upsert_token(chain, contract, pair)
+        await insert_call(group_doc, token_doc, text, link)
+
+        logging.info(f"Stored call {contract} from {group_doc['name']}")
+
 
 # ================= TELEGRAM HANDLER =================
 @tg.on(events.NewMessage)
 async def handler(event):
     try:
-        text = event.message.message
-        if not text:
-            return
-
-        addresses = {
-            addr
-            for regex in compiled_patterns.values()
-            for addr in regex.findall(text)
-        }
-
-        if not addresses:
-            return
-
-        chat = await event.get_chat()
-
-        member_count = None
-        try:
-            full = await tg(GetFullChannelRequest(channel=chat))
-            member_count = getattr(full.full_chat, "participants_count", None)
-        except Exception:
-            pass
-
-        # Get group profile image
-        profile_image_url = await get_profile_image_url(
-            chat, chat.id, getattr(chat, "username", None) or str(chat.id)
+        await asyncio.wait_for(_process_new_message(event), timeout=HANDLER_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logging.error("Handler timed out after %ss", HANDLER_TIMEOUT_SEC)
+        await notify_error(
+            "Handler timeout",
+            f"Processing exceeded {HANDLER_TIMEOUT_SEC}s (Telegram/Dex/DB)",
         )
-
-        group_doc = await upsert_group(chat, member_count, profile_image_url)
-
-        link = (
-            f"https://t.me/{group_doc['username']}/{event.message.id}"
-            if not group_doc["username"].startswith("tg_")
-            else None
-        )
-
-        for addr in addresses:
-            dex_raw = fetch_dexscreener_data(addr)
-            pairs = extract_dexscreener_fields(dex_raw)
-
-            if not pairs:
-                continue
-
-            pair = pairs[0]
-            chain = pair.get("chainId")
-            contract = pair.get("baseToken", {}).get("address")
-
-            if not chain or not contract:
-                continue
-
-            token_doc = await upsert_token(chain, contract, pair)
-            await insert_call(group_doc, token_doc, text, link)
-
-            logging.info(f"Stored call {contract} from {group_doc['name']}")
-
     except Exception:
         await notify_error("Handler Crash", traceback.format_exc())
 
