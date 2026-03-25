@@ -543,6 +543,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 logging.basicConfig(level=logging.INFO)
 
+APP_START_TIME = datetime.now(UTC)
+
 
 # ================= CLIENTS =================
 tg = TelegramClient(SESSION, API_ID, API_HASH)
@@ -588,24 +590,44 @@ async def ensure_indexes():
         logging.error(f"❌ Index creation failed (ignored): {e}")
 
 
-# ================= ERROR NOTIFY =================
-async def notify_error(title, details=""):
+# ================= BOT NOTIFY =================
+async def send_bot_message(text):
+    """Send a message via the error notification bot."""
     if not ERROR_CHAT or not ERROR_BOT:
         return
-
     try:
         url = f"https://api.telegram.org/bot{ERROR_BOT}/sendMessage"
-
         async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(
-                url,
-                json={
-                    "chat_id": ERROR_CHAT,
-                    "text": f"🚨 {title}\n\n{details[:1000]}",
-                },
-            )
+            await c.post(url, json={"chat_id": ERROR_CHAT, "text": text})
     except Exception:
         pass
+
+
+async def notify_error(title, details=""):
+    await send_bot_message(f"🚨 {title}\n\n{details[:1000]}")
+
+
+async def health_notify_loop():
+    """Send a health status update every 30 minutes."""
+    while True:
+        await asyncio.sleep(1800)  # 30 min
+        try:
+            connected = tg.is_connected()
+            status = "✅ HEALTHY" if connected else "⚠️ UNHEALTHY"
+            uptime = datetime.now(UTC) - APP_START_TIME
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes, _ = divmod(remainder, 60)
+
+            text = (
+                f"📊 Server Health Report\n\n"
+                f"Status: {status}\n"
+                f"Telegram: {'Connected' if connected else 'Disconnected'}\n"
+                f"Uptime: {hours}h {minutes}m\n"
+                f"Time: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}"
+            )
+            await send_bot_message(text)
+        except Exception as e:
+            logging.error(f"Health notify failed: {e}")
 
 
 # ================= HEALTH =================
@@ -713,19 +735,23 @@ async def get_profile_image_url(sender, sender_id, username):
 
 
 # ================= DB OPS =================
-async def upsert_group(chat, member_count):
+async def upsert_group(chat, member_count, profile_image_url=None):
     username = safe_username(getattr(chat, "username", None), chat.id)
     name = getattr(chat, "title", username)
+
+    set_fields = {
+        "name": name,
+        "username": username,
+        "current_member_count": member_count,
+        "updated_at": now(),
+    }
+    if profile_image_url:
+        set_fields["profile_image"] = profile_image_url
 
     return await groups.find_one_and_update(
         {"telegram_id": chat.id},
         {
-            "$set": {
-                "name": name,
-                "username": username,
-                "current_member_count": member_count,
-                "updated_at": now(),
-            },
+            "$set": set_fields,
             "$max": {"max_member_count_seen": member_count or 0},
             "$setOnInsert": {
                 "total_calls": 0,
@@ -783,26 +809,24 @@ async def upsert_token(chain, contract, pair):
     )
 
 
-async def insert_call(group_doc, token_doc, msg, link, caller_username=None, profile_image_url=None):
+async def insert_call(group_doc, token_doc, msg, link):
     try:
-        call_doc = {
-            "group_id": group_doc["_id"],
-            "token_id": token_doc["_id"],
-            "message_text": msg,
-            "message_link": link,
-            "created_at": now(),
-        }
-        if caller_username:
-            call_doc["caller_username"] = caller_username
-        if profile_image_url:
-            call_doc["profile_image"] = profile_image_url
-
-        await calls.insert_one(call_doc)
+        await calls.insert_one(
+            {
+                "group_id": group_doc["_id"],
+                "token_id": token_doc["_id"],
+                "message_text": msg,
+                "message_link": link,
+                "created_at": now(),
+            }
+        )
     except Exception:
         return  # duplicate safely ignored
 
-    group_update = {"$inc": {"total_calls": 1}, "$addToSet": {"unique_tokens": token_doc["_id"]}}
-    await groups.update_one({"_id": group_doc["_id"]}, group_update)
+    await groups.update_one(
+        {"_id": group_doc["_id"]},
+        {"$inc": {"total_calls": 1}, "$addToSet": {"unique_tokens": token_doc["_id"]}},
+    )
 
     await tokens.update_one(
         {"_id": token_doc["_id"]},
@@ -848,24 +872,18 @@ async def handler(event):
         except Exception:
             pass
 
-        group_doc = await upsert_group(chat, member_count)
+        # Get group profile image
+        profile_image_url = await get_profile_image_url(
+            chat, chat.id, getattr(chat, "username", None) or str(chat.id)
+        )
+
+        group_doc = await upsert_group(chat, member_count, profile_image_url)
 
         link = (
             f"https://t.me/{group_doc['username']}/{event.message.id}"
             if not group_doc["username"].startswith("tg_")
             else None
         )
-
-        # Get caller info and profile image
-        sender = event.message.sender
-        sender_id = event.message.sender_id
-        caller_username = (
-            sender.username if sender and hasattr(sender, 'username') and sender.username
-            else str(sender_id) if sender_id
-            else "Unknown"
-        )
-
-        profile_image_url = await get_profile_image_url(sender, sender_id, caller_username)
 
         for addr in addresses:
             dex_raw = fetch_dexscreener_data(addr)
@@ -882,9 +900,9 @@ async def handler(event):
                 continue
 
             token_doc = await upsert_token(chain, contract, pair)
-            await insert_call(group_doc, token_doc, text, link, caller_username, profile_image_url)
+            await insert_call(group_doc, token_doc, text, link)
 
-            logging.info(f"Stored call {contract} from {group_doc['name']} by {caller_username}")
+            logging.info(f"Stored call {contract} from {group_doc['name']}")
 
     except Exception:
         await notify_error("Handler Crash", traceback.format_exc())
@@ -892,16 +910,17 @@ async def handler(event):
 
 # ================= MAIN =================
 async def main():
-    # 1️⃣ Start health server FIRST (Cloud Run stability)
     await start_health()
     logging.info("Health server started on port %s", PORT)
 
-    # 2️⃣ Ensure indexes WITHOUT crashing startup
     asyncio.create_task(ensure_indexes())
 
-    # 3️⃣ Start Telegram
     await tg.start()
     logging.info("Telegram connected")
+
+    await send_bot_message("🟢 Telegram Listener started and connected.")
+
+    asyncio.create_task(health_notify_loop())
 
     await tg.run_until_disconnected()
 

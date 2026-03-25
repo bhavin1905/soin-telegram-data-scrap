@@ -165,6 +165,6 @@ logs/
 *.ps1.bak
 
 # Session and state files
-*.session
+# *.session
 *.state
 
